@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>온라인 방명록 | Guestbook</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+  <div class="container">
+    <!-- 상단 헤더 -->
+    <header class="header">
+      <div class="header-badge">
+        <span id="statusDot" class="status-dot"></span>
+        <span id="statusText">Firebase 연결 확인 중...</span>
+      </div>
+      <h1>온라인 방명록</h1>
+      <p>따뜻한 인사와 소중한 메시지를 남겨주세요.</p>
+    </header>
+
+    <!-- Firebase 설정 안내 배너 (설정 전 또는 오류 시 표시) -->
+    <div id="noticeBanner" class="notice-banner"></div>
+
+    <!-- 방명록 입력 폼 카드 -->
+    <section class="card" aria-label="방명록 작성">
+      <form id="guestbookForm" novalidate>
+        <div class="form-group">
+          <label for="authorName" class="form-label">
+            이름<span class="required">*</span>
+          </label>
+          <input type="text" id="authorName" class="form-input" placeholder="이름 또는 닉네임을 입력하세요" maxlength="30"
+            autocomplete="name" />
+        </div>
+
+        <div class="form-group">
+          <label for="authorMessage" class="form-label">
+            메시지<span class="required">*</span>
+          </label>
+          <textarea id="authorMessage" class="form-textarea" placeholder="방명록 메시지를 입력하세요" maxlength="500"></textarea>
+        </div>
+
+        <div class="form-footer">
+          <div id="validationMsg" class="validation-msg" role="alert"></div>
+          <button type="submit" id="submitBtn" class="submit-btn">
+            등록하기
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <!-- 방명록 목록 영역 -->
+    <section aria-label="방명록 목록">
+      <div class="list-header">
+        <h2 class="list-title">
+          남겨진 메시지
+          <span id="countBadge" class="count-badge">0</span>
+        </h2>
+      </div>
+
+      <div id="guestbookList" class="guestbook-list">
+        <div class="empty-state">
+          <div class="empty-state-icon">⏳</div>
+          <p>방명록 데이터를 불러오는 중입니다...</p>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Firebase SDK 및 방명록 스크립트 -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+    import {
+      getFirestore,
+      collection,
+      addDoc,
+      query,
+      orderBy,
+      onSnapshot,
+      serverTimestamp
+    } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+    // =========================================================================
+    // [1단계] Firebase Console에서 복사한 firebaseConfig 정보 (guestbook2-96566)
+    // =========================================================================
+    const firebaseConfig = {
+      apiKey: "AIzaSyBHuL1_gmo56hZ984XIFnItondvgp-aE7k",
+      authDomain: "guestbook2-96566.firebaseapp.com",
+      projectId: "guestbook2-96566",
+      storageBucket: "guestbook2-96566.firebasestorage.app",
+      messagingSenderId: "967129214795",
+      appId: "1:967129214795:web:45a4a23e410527178fc2ce"
+    };
+
+    // Firestore 컬렉션 이름
+    const COLLECTION_NAME = "guestbook";
+
+    // DOM 요소 참조
+    const statusDot = document.getElementById("statusDot");
+    const statusText = document.getElementById("statusText");
+    const noticeBanner = document.getElementById("noticeBanner");
+    const guestbookForm = document.getElementById("guestbookForm");
+    const authorNameInput = document.getElementById("authorName");
+    const authorMessageInput = document.getElementById("authorMessage");
+    const validationMsg = document.getElementById("validationMsg");
+    const submitBtn = document.getElementById("submitBtn");
+    const countBadge = document.getElementById("countBadge");
+    const guestbookList = document.getElementById("guestbookList");
+
+    // 설정 여부 확인
+    const isConfigured =
+      firebaseConfig.apiKey &&
+      firebaseConfig.apiKey !== "YOUR_API_KEY" &&
+      firebaseConfig.projectId &&
+      firebaseConfig.projectId !== "YOUR_PROJECT_ID";
+
+    let db = null;
+
+    // 날짜/시간 포맷 함수 (YYYY.MM.DD HH:mm)
+    function formatTimestamp(timestamp) {
+      if (!timestamp) return "방금 전";
+      const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      const hours = String(date.getHours()).padStart(2, "0");
+      const minutes = String(date.getMinutes()).padStart(2, "0");
+      return `${year}.${month}.${day} ${hours}:${minutes}`;
+    }
+
+    // XSS 방지를 위한 텍스트 이스케이프
+    function escapeHtml(str) {
+      return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    // 방명록 목록 렌더링
+    function renderEntries(entries) {
+      countBadge.textContent = entries.length;
+
+      if (entries.length === 0) {
+        guestbookList.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">✍️</div>
+            <p>아직 등록된 방명록이 없습니다.<br/>첫 번째 메시지를 남겨보세요!</p>
+          </div>
+        `;
+        return;
+      }
+
+      guestbookList.innerHTML = entries
+        .map((item) => {
+          const safeName = escapeHtml(item.name || "익명");
+          const safeMessage = escapeHtml(item.message || "");
+          const firstChar = (item.name || "?").trim().charAt(0).toUpperCase();
+          const timeStr = formatTimestamp(item.createdAt);
+
+          return `
+            <article class="guestbook-item">
+              <div class="item-header">
+                <div class="author-info">
+                  <div class="avatar" aria-hidden="true">${escapeHtml(firstChar)}</div>
+                  <span class="author-name">${safeName}</span>
+                </div>
+                <time class="created-time">${timeStr}</time>
+              </div>
+              <div class="item-message">${safeMessage}</div>
+            </article>
+          `;
+        })
+        .join("");
+    }
+
+    // 입력창 에러 표시 초기화
+    function clearValidation() {
+      validationMsg.textContent = "";
+      authorNameInput.classList.remove("invalid");
+      authorMessageInput.classList.remove("invalid");
+    }
+
+    authorNameInput.addEventListener("input", clearValidation);
+    authorMessageInput.addEventListener("input", clearValidation);
+
+    // Firebase 초기화 및 실시간 목록 구독
+    if (!isConfigured) {
+      statusDot.className = "status-dot error";
+      statusText.textContent = "firebaseConfig 설정 대기 중";
+      noticeBanner.className = "notice-banner show";
+      noticeBanner.innerHTML = `
+        <strong>⚡ Firebase 연결 설정이 필요합니다</strong>
+        현재 <code>index.html</code>의 <code>firebaseConfig</code>에 예시 값이 들어 있습니다.
+        Firebase Console에서 확인한 설정 정보를 입력하면 즉시 연결됩니다.
+      `;
+      guestbookList.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state-icon">🔧</div>
+          <p>Firebase 설정이 완료되면 이곳에 방명록 목록이 표시됩니다.</p>
+        </div>
+      `;
+    } else {
+      try {
+        const app = initializeApp(firebaseConfig);
+        db = getFirestore(app);
+
+        // 최근 작성한 글이 위에 나타나도록 createdAt 내림차순(desc) 정렬
+        const q = query(
+          collection(db, COLLECTION_NAME),
+          orderBy("createdAt", "desc")
+        );
+
+        onSnapshot(
+          q,
+          (snapshot) => {
+            statusDot.className = "status-dot connected";
+            statusText.textContent = `Firebase 연결됨 (${firebaseConfig.projectId})`;
+            noticeBanner.className = "notice-banner";
+
+            const entries = [];
+            snapshot.forEach((doc) => {
+              entries.push({ id: doc.id, ...doc.data() });
+            });
+            renderEntries(entries);
+          },
+          (error) => {
+            console.error("Firestore 데이터 불러오기 오류:", error);
+            statusDot.className = "status-dot error";
+            statusText.textContent = "Firestore 권한/설정 확인 필요";
+            noticeBanner.className = "notice-banner show";
+            noticeBanner.innerHTML = `
+              <strong>⚠️ 데이터를 불러오지 못했습니다 (${escapeHtml(error.code || "오류")})</strong>
+              Firebase Console에서 <b>Firestore Database 생성 여부</b>와 <b>규칙(Rules)</b> 설정이 완료되었는지 확인해주세요.
+            `;
+          }
+        );
+      } catch (err) {
+        console.error("Firebase 초기화 오류:", err);
+        statusDot.className = "status-dot error";
+        statusText.textContent = "초기화 오류";
+      }
+    }
+
+    // 폼 제출(등록 버튼 클릭) 이벤트 처리
+    guestbookForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      clearValidation();
+
+      const name = authorNameInput.value.trim();
+      const message = authorMessageInput.value.trim();
+
+      // 이름이나 메시지를 입력하지 않았을 때 등록 방지 처리
+      if (!name && !message) {
+        validationMsg.textContent = "이름과 메시지를 모두 입력해주세요.";
+        authorNameInput.classList.add("invalid");
+        authorMessageInput.classList.add("invalid");
+        authorNameInput.focus();
+        return;
+      }
+
+      if (!name) {
+        validationMsg.textContent = "이름을 입력해주세요.";
+        authorNameInput.classList.add("invalid");
+        authorNameInput.focus();
+        return;
+      }
+
+      if (!message) {
+        validationMsg.textContent = "메시지를 입력해주세요.";
+        authorMessageInput.classList.add("invalid");
+        authorMessageInput.focus();
+        return;
+      }
+
+      if (!db) {
+        validationMsg.textContent = "아직 Firebase가 연결되지 않았습니다. firebaseConfig를 먼저 설정해주세요.";
+        return;
+      }
+
+      try {
+        submitBtn.disabled = true;
+        submitBtn.textContent = "등록 중...";
+
+        // Firestore에 이름, 메시지, 작성 시간 저장
+        await addDoc(collection(db, COLLECTION_NAME), {
+          name: name,
+          message: message,
+          createdAt: serverTimestamp()
+        });
+
+        // 입력란 초기화 (이름은 유지하거나 비울 수 있으나 깔끔하게 모두 초기화)
+        authorNameInput.value = "";
+        authorMessageInput.value = "";
+        authorNameInput.focus();
+      } catch (error) {
+        console.error("방명록 저장 오류:", error);
+        validationMsg.textContent = "저장 중 오류가 발생했습니다. Firestore 보안 규칙을 확인해주세요.";
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "등록하기";
+      }
+    });
+  </script>
+</body>
+
+</html>
